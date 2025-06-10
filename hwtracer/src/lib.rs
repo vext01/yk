@@ -15,8 +15,15 @@ mod pt;
 pub use errors::{HWTracerError, TemporaryErrorKind};
 #[cfg(test)]
 use std::time::SystemTime;
-use std::{fmt::Debug, sync::Arc};
+use std::{fs, fmt::Debug, sync::Arc};
 use thiserror::Error;
+
+/// If we used perf to collect PT traces on this system, should we use PT filtering?
+pub fn use_pt_filtering() -> bool {
+    // PT IP filtering doesn't work inside docker.
+    // https://lore.kernel.org/linux-perf-users/aBCwoq7w8ohBRQCh@fremen.lan/
+    !fs::exists("/.dockerenv").unwrap()
+}
 
 /// A builder for [Tracer]s. By default, will attempt to use the most appropriate [Tracer] for your
 /// platform/configuration. This can be overridden with [TracerBuilder::tracer_kind] and

@@ -71,6 +71,7 @@ fn main() {
                 mk_compiler(wrapper_path.as_path(), &exe, p, &extra_objs, true, None);
             compiler.env("YK_COMPILER_PATH", ykllvm_bin("clang"));
             let runtime = Command::new(exe.clone());
+            dbg!(&runtime);
             vec![("Compiler", compiler), ("Run-time", runtime)]
         })
         .fm_options(|_, _, fmb| {

@@ -219,7 +219,7 @@ impl Iterator for PacketParser<'_> {
     type Item = Result<Packet, HWTracerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.pt_bytes.is_empty() {
+       if !self.pt_bytes.is_empty() {
             Some(self.parse_packet())
         } else {
             None

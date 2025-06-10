@@ -303,13 +303,30 @@ impl YkPTBlockIterator<'_> {
                     self.comprets
                         .push(CompRetAddr::AfterCall(call_info.callsite_vaddr()));
                 }
-                self.cur_loc = ObjLoc::MainObj(target_vaddr);
-                return Ok(Some(self.lookup_block_by_vaddr(target_vaddr)?));
+                // eprintln!("follow known call target to: {:x}", target_vaddr);
+                if crate::perf::collect::YKTEXT_EXTENT.contains(&target_vaddr) {
+                    self.cur_loc = ObjLoc::MainObj(target_vaddr);
+                    return Ok(Some(self.lookup_block_by_vaddr(target_vaddr)?));
+                } else {
+                    // eprintln!("PT filtered out callee");
+                    // We have a blockmap entry for the callee, but the function was filtered out
+                    // at the PT level, so we won't see PT packets for it and we shouldn't allow
+                    // compiler-assisted decoding to shoot off through this callee. Instead look
+                    // for a TIP update that tells us where to resume decoding.
+                    self.seek_tip()?;
+                    return match self.cur_loc {
+                        ObjLoc::MainObj(vaddr) => Ok(Some(self.lookup_block_by_vaddr(vaddr)?)),
+                        ObjLoc::OtherObjOrUnknown(_) => Ok(Some(Block::Unknown)),
+                    };
+                }
             } else {
                 // The address of the callee isn't known.
+                // eprintln!("Follow call unknown");
                 self.comprets
                     .push(CompRetAddr::AfterCall(call_info.callsite_vaddr()));
+                // eprintln!("SEEKTIP");
                 self.seek_tip()?;
+                // eprintln!("/SEEKTIP");
                 return match self.cur_loc {
                     ObjLoc::MainObj(vaddr) => Ok(Some(self.lookup_block_by_vaddr(vaddr)?)),
                     ObjLoc::OtherObjOrUnknown(_) => Ok(Some(Block::Unknown)),
@@ -357,6 +374,7 @@ impl YkPTBlockIterator<'_> {
     fn follow_blockmap_successor(&mut self, ent: &BlockMapEntry) -> Result<Block, IteratorError> {
         match ent.successor() {
             SuccessorKind::Unconditional { target } => {
+                // eprintln!("follow uncond");
                 if let Some(target_vaddr) = target {
                     self.cur_loc = ObjLoc::MainObj(*target_vaddr);
                     self.lookup_block_by_vaddr(*target_vaddr)
@@ -370,6 +388,7 @@ impl YkPTBlockIterator<'_> {
                 taken_target,
                 not_taken_target,
             } => {
+                // eprintln!("follow cond");
                 let target_vaddr = self.follow_conditional_successor(
                     *num_cond_brs,
                     *taken_target,
@@ -379,6 +398,7 @@ impl YkPTBlockIterator<'_> {
                 self.lookup_block_by_vaddr(target_vaddr)
             }
             SuccessorKind::Return => {
+                // eprintln!("follow ret");
                 if self.is_return_compressed()? {
                     // This unwrap cannot fail if the CPU has implemented compressed
                     // returns correctly.
@@ -403,29 +423,46 @@ impl YkPTBlockIterator<'_> {
                 }
             }
             SuccessorKind::Dynamic => {
+                // eprintln!("follow dyn");
                 // We can only know the successor via a TIP update in a packet.
                 self.seek_tip()?;
                 match self.cur_loc {
-                    ObjLoc::MainObj(vaddr) => Ok(self.lookup_block_by_vaddr(vaddr)?),
-                    ObjLoc::OtherObjOrUnknown(_) => Ok(Block::Unknown),
+                    ObjLoc::MainObj(vaddr) => {
+                        // eprintln!("dyn vaddr: {vaddr:x}");
+                        if crate::perf::collect::YKTEXT_EXTENT.contains(&vaddr) {
+                            // eprintln!("not filtered");
+                        }
+                        Ok(self.lookup_block_by_vaddr(vaddr)?)
+                    },
+                    ObjLoc::OtherObjOrUnknown(_) => {
+                        // eprintln!("dyn vaddr: ???");
+                        Ok(Block::Unknown)
+                    }
                 }
             }
         }
     }
 
     fn do_next(&mut self) -> Result<Block, IteratorError> {
+        // dbg!(&self.cur_loc);
         // Read as far ahead as we can using static successor info encoded into the blockmap.
+        // eprintln!("cur_loc: {:?}", self.cur_loc);
+        // eprintln!("cur tnts: {:?}", self.tnts);
         match self.cur_loc {
             ObjLoc::MainObj(vaddr) => {
+                // eprintln!("in: {:?}", ykaddr::addr::vaddr_to_sym_and_obj(vaddr));
                 // We know where we are in the main object binary, so there's a chance that there's
                 // a blockmap entry for this location (not all code from the main object binary
                 // necessarily has blockmap info. e.g. PLT resolution routines).
                 if let Some(ent) = self.lookup_blockmap_entry(vaddr) {
                     // If there are calls in the block that come *after* the current position in the
                     // block, then we will need to follow those before we look at the successor info.
+                    // dbg!("LLL1");
                     if let Some(blk) = self.maybe_follow_blockmap_call(vaddr, &ent.value)? {
+                        // dbg!("LLL2");
                         Ok(blk)
                     } else {
+                        // dbg!("LLL3");
                         // If we get here, there were no further calls to follow in the block, so we
                         // consult the static successor information.
                         self.follow_blockmap_successor(&ent.value)
@@ -463,7 +500,7 @@ impl YkPTBlockIterator<'_> {
             // This *may* be a compressed return. If the next (non-out-of-context) event packet
             // carries a TIP update then this was an uncompressed return, otherwise it was
             // compressed.
-            let pkt = self.seek_tnt_or_tip(true)?;
+            let pkt = self.seek_tnt_or_tip(true, true)?;
             pkt.tnts().is_some()
         };
 
@@ -664,7 +701,10 @@ impl YkPTBlockIterator<'_> {
     /// their TIP updates are not useful to us.
     fn seek_tip(&mut self) -> Result<(), IteratorError> {
         loop {
+            // eprintln!("XXX");
             let pkt = self.packet()?;
+            // dbg!(&pkt);
+            // eprintln!("YYY");
             if pkt.kind().encodes_target_ip() && pkt.kind() != PacketKind::TIPPGD {
                 // Note that self.packet() will have updated `self.cur_loc`.
                 return Ok(());
@@ -680,15 +720,18 @@ impl YkPTBlockIterator<'_> {
     /// `skip_ooc` determines whether the caller wishes to skip over "Out Of Context" TIP packets
     /// or not.
     ///
+    /// XXX
     /// Unlike `seek_tip` this function does not skip over TIP.PGD packets.
     ///
     /// FIXME: ^this is a bit confusing. Maybe we should add flags to both of these functions and
     /// let the call-sites decide if they care for TIP.PGD or not.
-    fn seek_tnt_or_tip(&mut self, skip_ooc: bool) -> Result<Packet, IteratorError> {
+    fn seek_tnt_or_tip(&mut self, skip_ooc: bool, skip_pgd: bool) -> Result<Packet, IteratorError> {
         loop {
+            // dbg!("AAA");
             let pkt = self.packet()?;
+            // dbg!("BBB");
             if pkt.tnts().is_some()
-                || (pkt.kind().encodes_target_ip() && (pkt.target_ip().is_some() || !skip_ooc))
+                || (pkt.kind().encodes_target_ip() && (pkt.kind() != PacketKind::TIPPGD || !skip_pgd) && (pkt.target_ip().is_some() || !skip_ooc))
             {
                 return Ok(pkt);
             }
@@ -717,7 +760,9 @@ impl YkPTBlockIterator<'_> {
 
     /// Fetch the next packet and update iterator state.
     fn packet(&mut self) -> Result<Packet, IteratorError> {
+        // dbg!("packet");
         if let Some(pkt_or_err) = self.parser.next() {
+            // dbg!("is more");
             let mut pkt = pkt_or_err?;
 
             if pkt.kind() == PacketKind::OVF {
@@ -727,6 +772,7 @@ impl YkPTBlockIterator<'_> {
             }
 
             if pkt.kind() == PacketKind::FUP && !self.unbound_modes {
+                // dbg!("FUP");
                 // FIXME: https://github.com/ykjit/yk/issues/593
                 //
                 // A FUP packet when there are no outstanding MODE packets indicates that
@@ -737,13 +783,13 @@ impl YkPTBlockIterator<'_> {
                 // TIP.PGD, TIP.PGE] sequence (with no intermediate TIP or TNT packets). In
                 // this case we can simply ignore the interruption. Later we need to support
                 // FUPs more generally.
-                pkt = self.seek_tnt_or_tip(false)?;
+                pkt = self.seek_tnt_or_tip(false, false)?;
                 if pkt.kind() != PacketKind::TIPPGD {
                     return Err(IteratorError::HWTracerError(HWTracerError::Temporary(
                         TemporaryErrorKind::TraceInterrupted,
                     )));
                 }
-                pkt = self.seek_tnt_or_tip(true)?;
+                pkt = self.seek_tnt_or_tip(true, false)?;
                 if pkt.kind() != PacketKind::TIPPGE {
                     return Err(IteratorError::HWTracerError(HWTracerError::Temporary(
                         TemporaryErrorKind::TraceInterrupted,
@@ -812,7 +858,8 @@ impl YkPTBlockIterator<'_> {
 
             Ok(pkt)
         } else {
-            Err(IteratorError::NoMorePackets)
+            // dbg!("no more");
+            return Err(IteratorError::NoMorePackets);
         }
     }
 }
@@ -821,12 +868,16 @@ impl Iterator for YkPTBlockIterator<'_> {
     type Item = Result<Block, BlockIteratorError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // dbg!("NEXT");
         match self.do_next() {
             Ok(b) => Some(Ok(b)),
-            Err(IteratorError::NoMorePackets) => None,
+            Err(IteratorError::NoMorePackets) => {
+                // dbg!("no more packets top");
+                None
+            }
             Err(IteratorError::NoSuchVAddr) => Some(Err(BlockIteratorError::NoSuchVAddr)),
             Err(IteratorError::HWTracerError(e)) => Some(Err(BlockIteratorError::HWTracerError(e))),
-        }
+        } // .inspect(|x| { dbg!(&x); })
     }
 }
 

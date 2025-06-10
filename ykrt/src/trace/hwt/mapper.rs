@@ -202,6 +202,7 @@ impl Iterator for HWTTraceIterator {
         // `self.upcoming` in order to deduplicate, but there's no use in having more than 1
         // element.
         while self.upcoming.len() < 2 {
+            // dbg!("yyy");
             match self.hwt_iter.next() {
                 Some(Ok(x)) => {
                     self.map_block(&x);
@@ -218,7 +219,6 @@ impl Iterator for HWTTraceIterator {
                 }
                 Some(Err(e)) => return Some(Err(AOTTraceIteratorError::Other(e.to_string()))),
                 None => {
-                    // The last block should contains pointless unmappable code (the stop tracing call).
                     match self.upcoming.pop() {
                         Some(x) => {
                             // This is a rough proxy for "check that we removed only the thing we want to
@@ -226,10 +226,23 @@ impl Iterator for HWTTraceIterator {
                             if matches!(x, TraceAction::UnmappableBBlock) {
                                 return None;
                             } else {
+                                if !hwtracer::use_pt_filtering() {
+                                    return Some(Err(AOTTraceIteratorError::PrematureEnd));
+                                } else {
+                                    return Some(Ok(x));
+                                }
+                            }
+                        }
+                        None => {
+                            // If PT filtering isn't being used then the last trace action will be
+                            // a block of unmappable code (the innards of the control point etc.).
+                            // Otherwise we've already seen the last block.
+                            if hwtracer::use_pt_filtering() {
+                                return None;
+                            } else {
                                 return Some(Err(AOTTraceIteratorError::PrematureEnd));
                             }
                         }
-                        None => return Some(Err(AOTTraceIteratorError::PrematureEnd)),
                     }
                 }
             }

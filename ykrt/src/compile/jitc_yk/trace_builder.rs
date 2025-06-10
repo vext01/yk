@@ -179,6 +179,7 @@ impl TraceBuilder {
                 aot_ir::Inst::Promote { tyidx, .. }
                 | aot_ir::Inst::IdempotentPromote { tyidx, .. } => {
                     // Consume the correct number of bytes from the promoted values array.
+                    // dbg!(self.aot_mod.type_(*tyidx).bytew());
                     self.promote_idx +=
                         usize::try_from(self.aot_mod.type_(*tyidx).bytew()).unwrap();
                 }
@@ -207,7 +208,9 @@ impl TraceBuilder {
         let blk = self.aot_mod.bblock(bid);
 
         // Decide how to translate each AOT instruction.
+        // eprintln!("BLOCK: {bid:?}");
         for (iidx, inst) in blk.insts.iter().enumerate() {
+            // eprintln!("inst: {}", inst.display(self.aot_mod, None));
             match inst {
                 aot_ir::Inst::Br { .. } => Ok(()),
                 aot_ir::Inst::Load {
@@ -813,6 +816,7 @@ impl TraceBuilder {
         safepoint: Option<&'static aot_ir::DeoptSafepoint>,
         nextinst: &'static aot_ir::Inst,
     ) -> Result<(), CompilationError> {
+        // eprintln!("handle call");
         // Ignore special functions that we neither want to inline nor copy.
         if inst.is_debug_call(self.aot_mod) {
             return Ok(());
@@ -887,6 +891,7 @@ impl TraceBuilder {
             });
             Ok(())
         } else {
+            // eprintln!("start outline");
             // This call can't be inlined. It is either unmappable (a declaration or an indirect
             // call) or the compiler annotated it with `yk_outline`.
             self.outline_until_after_call(bid, nextinst);
@@ -1225,6 +1230,7 @@ impl TraceBuilder {
                     )),
                     x => todo!("{x}"),
                 };
+                // dbg!(bytew);
                 self.promote_idx += bytew;
                 Const::Int(tyidx, ArbBitInt::from_u64(*bitw, v))
             }
@@ -1236,6 +1242,7 @@ impl TraceBuilder {
                         .try_into()
                         .unwrap(),
                 );
+                // dbg!(bytew);
                 self.promote_idx += bytew;
                 Const::Ptr(v)
             }
@@ -1507,8 +1514,10 @@ impl TraceBuilder {
         #[cfg(tracer_hwt)]
         let mut last_blk_is_return = false;
         while let Some(b) = trace_iter.next() {
+            // eprintln!("TOP: {b:?}");
             match self.lookup_aot_block(&b) {
                 Some(bid) => {
+                    // eprintln!("mappable: {bid:?}");
                     // MappedAOTBBlock block
                     if let Some(prev_mbid) = &prev_mappable_bid {
                         // Due to the way HWT works, when you return from a call, you see the same
@@ -1552,6 +1561,7 @@ impl TraceBuilder {
                             // We've reached the successor block of the function/block that
                             // started outlining. We are done and can continue processing
                             // blocks normally.
+                            // eprintln!("stop outlining");
                             self.outline_target_blk = None;
                         } else {
                             // We are outlining so just skip this block. However, we still need to
@@ -1609,10 +1619,12 @@ impl TraceBuilder {
                 }
                 None => {
                     // Unmappable block
+                    // eprintln!("unmappable");
                     prev_bid = None;
                 }
             }
         }
+        // eprintln!("build 3");
 
         assert_eq!(self.promote_idx, self.promotions.len());
         assert_eq!(self.debug_str_idx, self.debug_strs.len());
